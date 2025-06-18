@@ -17,8 +17,8 @@ A Flask and Streamlit-based application for managing voicemail audio files and p
 ## Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/voice-message-manager.git
-   cd voice-message-manager
+   git clone https://github.com/Mu240/Voice-Message-Manager.git
+   cd Voice-Message-Manager
    ```
 2. Create a virtual environment and activate it:
    ```bash
