@@ -70,20 +70,62 @@ def contains_keywords(text, keyword_list):
 
 # Keyword lists
 voicemail_keywords = [
-    "This is [Name]", "I'm not available", "Can't take your call", "I'm currently away",
-    "Leave your name and number", "After the beep", "Please leave a message", "Your call is important",
-    "Sorry I missed your call", "Please record your message", "I'll call you back", "At the tone",
-    "Leave a brief message", "Please speak clearly", "I'm unable to answer", "Currently unavailable",
-    "Mailbox is full", "Out of the office", "Not available right now", "Leave your message after the tone",
-    "I'll return your call"
+    "You’ve reached",
+    "This is [Name]",
+    "I’m not available",
+    "Can’t take your call",
+    "I’m currently away",
+    "Leave your name and number",
+    "After the beep",
+    "Please leave a message",
+    "Your call is important",
+    "Sorry I missed your call",
+    "Please record your message",
+    "I’ll call you back",
+    "At the tone",
+    "Leave a brief message",
+    "Please speak clearly",
+    "I’m unable to answer",
+    "Currently unavailable",
+    "Mailbox is full",
+    "Out of the office",
+    "Not available right now",
+    "Leave your message after the tone",
+    "I’ll return your call",
+    "Press 1 to leave a message",
+    "Thank you for calling",
+    "I’ll get back to you"
 ]
 honeypot_keywords = [
-    "im listening", "i dont hear you", "please explain", "why are you calling", "say your name",
-    "i did not consent", "otherwise", "date and time", "consent", "please say your name",
-    "please fully describe your product or service", "describe", "product or service", "product",
-    "service", "can you hear me", "what did you say", "location", "company", "located", "email",
-    "are you there", "tell me more", "wait wait wait", "can you hear me good good good",
-    "go ahead and", "go ahead and do it", "blessed day", "call me back later"
+    "im listening",
+    "i dont hear you",
+    "please explain",
+    "why are you calling",
+    "say your name",
+    "i did not consent",
+    "otherwise",
+    "date and time",
+    "consent",
+    "please say your name",
+    "please fully describe your product or service",
+    "describe",
+    "product or service",
+    "product",
+    "service",
+    "can you hear me",
+    "what did you say",
+    "location",
+    "company",
+    "located",
+    "email",
+    "are you there",
+    "tell me more",
+    "wait wait wait",
+    "can you hear me good good good",
+    "go ahead and",
+    "go ahead and do it",
+    "blessed day",
+    "call me back later"
 ]
 
 @app.route("/api/respond", methods=["POST"])
@@ -105,9 +147,8 @@ def respond():
             "end": 1
         }
     elif contains_keywords(text, honeypot_keywords):
-        audio_link = f"http://localhost:5000/audio/file/{default_audio_file}" if default_audio_file else ""
         response_data = {
-            "audio_link": audio_link,
+            "audio_link": "",
             "response": "No VM",
             "transfer": 0,
             "end": 1
@@ -370,7 +411,7 @@ if __name__ == "__main__":
                     if result.get("response") == "VM":
                         st.info("🎵 Voicemail keywords detected - VM audio will be played")
                     elif result.get("response") == "No VM":
-                        st.info("🚫 Honeypot keywords detected - VM audio included in response")
+                        st.info("🚫 Honeypot keywords detected - No VM audio included")
                     else:
                         st.info("➡️ AI VM detected - continue")
 
