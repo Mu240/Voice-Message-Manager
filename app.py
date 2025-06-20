@@ -70,31 +70,16 @@ def contains_keywords(text, keyword_list):
 
 # Keyword lists
 voicemail_keywords = [
-    "You’ve reached",
-    "This is [Name]",
-    "I’m not available",
-    "Can’t take your call",
-    "I’m currently away",
-    "Leave your name and number",
     "After the beep",
     "Please leave a message",
-    "Your call is important",
-    "Sorry I missed your call",
-    "Please record your message",
-    "I’ll call you back",
     "At the tone",
-    "Leave a brief message",
-    "Please speak clearly",
-    "I’m unable to answer",
-    "Currently unavailable",
-    "Mailbox is full",
-    "Out of the office",
-    "Not available right now",
-    "Leave your message after the tone",
-    "I’ll return your call",
-    "Press 1 to leave a message",
-    "Thank you for calling",
-    "I’ll get back to you"
+    "After the tone",
+    "Please leave your message",
+    "Please record a message",
+    "Please record your message",
+    "Voice messaging system",
+    "Unable to answer the phone right now",
+    "Person you are trying to reach is not available"
 ]
 honeypot_keywords = [
     "im listening",
