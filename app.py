@@ -51,23 +51,6 @@ def log_interaction(user_uuid, phone_number, text, response, transfer, end):
     except Exception as e:
         print(f"Error logging interaction: {e}")
 
-def contains_keywords(text, keyword_list):
-    if not text:
-        return False
-    lowered = text.lower()
-    # Check if any keyword or a close variation (substring) is present
-    for keyword in keyword_list:
-        keyword_lower = keyword.lower()
-        # Split keyword into words and check if any significant word is in the text
-        keyword_words = keyword_lower.split()
-        for word in keyword_words:
-            if len(word) > 3 and word in lowered:  # Only match words longer than 3 chars to avoid noise
-                return True
-        # Also check if the full keyword is a substring
-        if keyword_lower in lowered:
-            return True
-    return False
-
 # Keyword lists
 voicemail_keywords = [
     "After the beep",
@@ -123,7 +106,39 @@ def respond():
     # Get the current default audio file dynamically
     default_audio_file = get_default_audio_file()
 
-    if contains_keywords(text, voicemail_keywords):
+    # Check for voicemail keywords
+    text_lower = text.lower() if text else ""
+    is_voicemail = False
+    is_honeypot = False
+
+    for keyword in voicemail_keywords:
+        keyword_lower = keyword.lower()
+        keyword_words = keyword_lower.split()
+        for word in keyword_words:
+            if len(word) > 3 and word in text_lower:
+                is_voicemail = True
+                break
+        if keyword_lower in text_lower:
+            is_voicemail = True
+        if is_voicemail:
+            break
+
+    # Check for honeypot keywords if not a voicemail
+    if not is_voicemail:
+        for keyword in honeypot_keywords:
+            keyword_lower = keyword.lower()
+            keyword_words = keyword_lower.split()
+            for word in keyword_words:
+                if len(word) > 3 and word in text_lower:
+                    is_honeypot = True
+                    break
+            if keyword_lower in text_lower:
+                is_honeypot = True
+            if is_honeypot:
+                break
+
+    # Prepare response based on keyword detection
+    if is_voicemail:
         audio_link = f"http://localhost:5000/audio/file/{default_audio_file}" if default_audio_file else ""
         response_data = {
             "audio_link": audio_link,
@@ -131,7 +146,7 @@ def respond():
             "transfer": 0,
             "end": 1
         }
-    elif contains_keywords(text, honeypot_keywords):
+    elif is_honeypot:
         response_data = {
             "audio_link": "",
             "response": "No VM",
@@ -233,7 +248,7 @@ if __name__ == "__main__":
             audio_files = [f for f in os.listdir(audio_directory)
                            if f.endswith(".mp3") and os.path.exists(os.path.join(audio_directory, f))]
         else:
-            os.makedirs(audio_directory, exist_ok=True)
+            os.makedirs(audio_directory, None, True)
     except Exception as e:
         st.error(f"Error reading audio directory: {e}")
         audio_files = []
