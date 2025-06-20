@@ -106,35 +106,22 @@ def respond():
     # Get the current default audio file dynamically
     default_audio_file = get_default_audio_file()
 
-    # Check for voicemail keywords
+    # Check for exact matches of full keyword phrases
     text_lower = text.lower() if text else ""
     is_voicemail = False
     is_honeypot = False
 
+    # Check for exact voicemail keyword phrases
     for keyword in voicemail_keywords:
-        keyword_lower = keyword.lower()
-        keyword_words = keyword_lower.split()
-        for word in keyword_words:
-            if len(word) > 3 and word in text_lower:
-                is_voicemail = True
-                break
-        if keyword_lower in text_lower:
+        if keyword.lower() in text_lower:
             is_voicemail = True
-        if is_voicemail:
             break
 
-    # Check for honeypot keywords if not a voicemail
+    # Check for exact honeypot keyword phrases if not a voicemail
     if not is_voicemail:
         for keyword in honeypot_keywords:
-            keyword_lower = keyword.lower()
-            keyword_words = keyword_lower.split()
-            for word in keyword_words:
-                if len(word) > 3 and word in text_lower:
-                    is_honeypot = True
-                    break
-            if keyword_lower in text_lower:
+            if keyword.lower() in text_lower:
                 is_honeypot = True
-            if is_honeypot:
                 break
 
     # Prepare response based on keyword detection
@@ -156,7 +143,7 @@ def respond():
     else:
         response_data = {
             "audio_link": "",
-            "response": "continue",
+            "response": "not available",
             "transfer": 0,
             "end": 1
         }
@@ -413,7 +400,7 @@ if __name__ == "__main__":
                     elif result.get("response") == "No VM":
                         st.info("🚫 Honeypot keywords detected - No VM audio included")
                     else:
-                        st.info("➡️ AI VM detected - continue")
+                        st.info("➡️ No matching keywords detected - not available")
 
                 else:
                     st.error(f"❌ Failed to call API: {response.status_code} - {response.text}")
