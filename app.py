@@ -53,6 +53,12 @@ def log_interaction(user_uuid, phone_number, text, response, transfer, end):
 
 # Keyword lists
 voicemail_keywords = [
+    "beep",
+    "tone",
+    "message",
+    "unable",
+    "available",
+    "system",
     "After the beep",
     "Please leave a message",
     "At the tone",
