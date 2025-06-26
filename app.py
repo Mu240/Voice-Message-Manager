@@ -1,4 +1,5 @@
 import uuid
+import json
 from flask import Flask, request, jsonify, send_from_directory
 import os
 import streamlit as st
@@ -7,6 +8,10 @@ import pymysql
 from datetime import datetime
 import requests
 import time
+import websocket
+import wave
+from io import BytesIO
+from pydub import AudioSegment
 
 app = Flask(__name__)
 
@@ -15,17 +20,134 @@ audio_directory = "audio_files"
 selected_default_file_path = os.path.join(audio_directory, "default_audio.txt")
 os.makedirs(audio_directory, exist_ok=True)
 
-# Function to get the default audio file from default_audio.txt
+# Vosk WebSocket server configuration
+VOSK_WS_URL = "ws://localhost:2700"
+
+# FFmpeg configuration
+FFMPEG_PATH = r"C:\Users\mha82\Downloads\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe"  # Path to ffmpeg.exe
+
+# Set FFmpeg path for pydub
+if os.path.exists(FFMPEG_PATH):
+    AudioSegment.converter = FFMPEG_PATH
+else:
+    print(f"Error: FFmpeg executable not found at {FFMPEG_PATH}. Please update FFMPEG_PATH in app.py.")
+
+
+# Function to convert audio (MP3 or WAV) to WAV format suitable for Vosk
+def convert_to_wav(audio_data, filename):
+    try:
+        if not os.path.exists(FFMPEG_PATH):
+            raise FileNotFoundError(f"FFmpeg executable not found at {FFMPEG_PATH}")
+
+        extension = os.path.splitext(filename)[1].lower()
+        wav_io = BytesIO()
+
+        if extension == '.mp3':
+            audio = AudioSegment.from_mp3(BytesIO(audio_data))
+        elif extension == '.wav':
+            audio = AudioSegment.from_wav(BytesIO(audio_data))
+        else:
+            raise ValueError(f"Unsupported file extension: {extension}")
+
+        # Convert to Vosk-compatible format (mono, 16kHz, 16-bit)
+        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        audio.export(wav_io, format="wav")
+        return wav_io.getvalue()
+    except FileNotFoundError as e:
+        print(
+            f"Error: FFmpeg is not installed or not found at {FFMPEG_PATH}. Please verify the path or install FFmpeg.")
+        return None
+    except Exception as e:
+        print(f"Error converting audio to WAV: {e}")
+        return None
+
+
+# WebSocket client to send audio to Vosk server and get text
+def transcribe_audio(audio_data, filename):
+    try:
+        ws = websocket.create_connection(VOSK_WS_URL, timeout=10)
+        extension = os.path.splitext(filename)[1].lower()
+
+        # If WAV, check if it already meets Vosk requirements
+        if extension == '.wav':
+            try:
+                with wave.open(BytesIO(audio_data), 'rb') as wf:
+                    if wf.getnchannels() == 1 and wf.getsampwidth() == 2 and wf.getframerate() == 16000:
+                        wav_data = audio_data  # Use directly if format is correct
+                    else:
+                        wav_data = convert_to_wav(audio_data, filename)  # Convert if format doesn't match
+            except Exception as e:
+                print(f"Error reading WAV file: {e}")
+                wav_data = convert_to_wav(audio_data, filename)  # Fallback to conversion
+        else:
+            wav_data = convert_to_wav(audio_data, filename)
+
+        if not wav_data:
+            ws.close()
+            return "Error: Failed to convert audio to WAV format"
+
+        with wave.open(BytesIO(wav_data), 'rb') as wf:
+            if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != 16000:
+                print(
+                    "Warning: Audio format may not be compatible with Vosk (mono, 16-bit, 16kHz). Attempting to process anyway.")
+
+            ws.send(json.dumps({"config": {"sample_rate": 16000}}))
+            chunk_size = 8000
+            while True:
+                data = wf.readframes(chunk_size)
+                if len(data) == 0:
+                    break
+                ws.send_binary(data)
+
+            ws.send(json.dumps({"eof": 1}))
+            result = ""
+            timeout_counter = 0
+            max_timeout = 10
+
+            while timeout_counter < max_timeout:
+                try:
+                    response = ws.recv()
+                    response_json = json.loads(response)
+                    if "text" in response_json and response_json["text"]:
+                        result = response_json["text"]
+                        break
+                    elif "partial" in response_json:
+                        continue
+                    else:
+                        break
+                except websocket.WebSocketTimeoutException:
+                    timeout_counter += 1
+                    time.sleep(1)
+                    continue
+
+            ws.close()
+            return result if result else "No transcription available"
+
+    except websocket.WebSocketConnectionClosedException:
+        print("Error: WebSocket connection closed unexpectedly")
+        return "Error: WebSocket connection closed"
+    except websocket.WebSocketException as e:
+        print(f"Error: WebSocket error: {str(e)}")
+        return f"Error: {str(e)}"
+    except ConnectionRefusedError:
+        print("Error: Could not connect to Vosk server - is it running on ws://localhost:2700?")
+        return "Error: Could not connect to Vosk server"
+    except Exception as e:
+        print(f"Error in WebSocket transcription: {e}")
+        return f"Error: {str(e)}"
+
+
+# Function to get the default audio file
 def get_default_audio_file():
     if os.path.exists(selected_default_file_path):
         with open(selected_default_file_path, "r") as f:
             default_audio = f.read().strip()
-        # Verify the file exists in audio_directory
         if os.path.exists(os.path.join(audio_directory, default_audio)):
             return default_audio
     return None
 
-# MySQL configuration (disabled for now)
+
+# MySQL configuration (disabled by default)
 DB_CONFIG = {
     "host": "localhost",
     "user": "your_user",
@@ -33,8 +155,10 @@ DB_CONFIG = {
     "database": "voicemail_db"
 }
 
+
 def get_db_connection():
     return pymysql.connect(**DB_CONFIG)
+
 
 def log_interaction(user_uuid, phone_number, text, response, transfer, end):
     try:
@@ -44,93 +168,76 @@ def log_interaction(user_uuid, phone_number, text, response, transfer, end):
                 INSERT INTO interactions (uuid, phone_number, text, response, transfer, end, timestamp)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(sql, (user_uuid, phone_number, text,
-                                 response, transfer, end, datetime.now()))
+            cursor.execute(sql, (user_uuid, phone_number, text, response, transfer, end, datetime.now()))
             conn.commit()
         conn.close()
     except Exception as e:
         print(f"Error logging interaction: {e}")
 
+
 # Keyword lists
 voicemail_keywords = [
-    "beep",
-    "tone",
-    "message",
-    "unable",
-    "available",
-    "system",
-    "After the beep",
-    "Please leave a message",
-    "At the tone",
-    "After the tone",
-    "Please leave your message",
-    "Please record a message",
-    "Please record your message",
-    "Voice messaging system",
-    "Unable to answer the phone right now",
-    "Person you are trying to reach is not available"
+    "beep", "tone", "message", "unable", "available", "system",
+    "after the beep", "please leave a message", "at the tone",
+    "after the tone", "please leave your message",
+    "please record a message", "please record your message",
+    "voice messaging system", "unable to answer the phone right now",
+    "person you are trying to reach is not available"
 ]
 honeypot_keywords = [
-    "im listening",
-    "i dont hear you",
-    "please explain",
-    "why are you calling",
-    "say your name",
-    "i did not consent",
-    "otherwise",
-    "date and time",
-    "consent",
-    "please say your name",
-    "please fully describe your product or service",
-    "describe",
-    "product or service",
-    "product",
-    "service",
-    "can you hear me",
-    "what did you say",
-    "location",
-    "company",
-    "located",
-    "email",
-    "are you there",
-    "tell me more",
-    "wait wait wait",
-    "can you hear me good good good",
-    "go ahead and",
-    "go ahead and do it",
-    "blessed day",
-    "call me back later"
+    "im listening", "i dont hear you", "please explain",
+    "why are you calling", "say your name", "i did not consent",
+    "otherwise", "date and time", "consent", "please say your name",
+    "please fully describe your product or service", "describe",
+    "product or service", "product", "service", "can you hear me",
+    "what did you say", "location", "company", "located", "email",
+    "are you there", "tell me more", "wait wait wait",
+    "can you hear me good good good", "go ahead and",
+    "go ahead and do it", "blessed day", "call me back later"
 ]
+
 
 @app.route("/api/respond", methods=["POST"])
 def respond():
-    data = request.json or {}
-    text = data.get("text", "")
+    audio_data = request.files.get("audio") if request.files else None
+    data = {}
+
+    if request.is_json:
+        data = request.json or {}
+    elif request.form:
+        data = request.form.to_dict()
+    else:
+        return jsonify({"error": "Invalid request: No JSON or form data provided"}), 400
+
     user_uuid = data.get("uuid", str(uuid.uuid4()))
     phone_number = data.get("phone_number", "")
+    text_input = data.get("text", "")
 
-    # Get the current default audio file dynamically
+    text = ""
+    if audio_data:
+        audio_content = audio_data.read()
+        text = transcribe_audio(audio_content, audio_data.filename)
+        if text.startswith("Error"):
+            return jsonify({"error": text}), 400
+
+    text = text if text else text_input
     default_audio_file = get_default_audio_file()
 
-    # Check for exact matches of full keyword phrases
     text_lower = text.lower() if text else ""
     is_voicemail = False
     is_honeypot = False
 
-    # Check for exact voicemail keyword phrases
     for keyword in voicemail_keywords:
         if keyword.lower() in text_lower:
             is_voicemail = True
             break
 
-    # Check for exact honeypot keyword phrases if not a voicemail
     if not is_voicemail:
         for keyword in honeypot_keywords:
             if keyword.lower() in text_lower:
                 is_honeypot = True
                 break
 
-    # Prepare response based on keyword detection
     if is_voicemail:
         audio_link = f"http://localhost:5000/audio/file/{default_audio_file}" if default_audio_file else ""
         response_data = {
@@ -154,8 +261,10 @@ def respond():
             "end": 1
         }
 
-    # log_interaction(user_uuid, phone_number, text, response_data["response"], response_data["transfer"], response_data["end"])  # Disabled temporarily
+    # Uncomment to enable MySQL logging
+    # log_interaction(user_uuid, phone_number, text, response_data["response"], response_data["transfer"], response_data["end"])
     return jsonify(response_data)
+
 
 @app.route("/audio/file/<filename>")
 def get_audio_file(filename):
@@ -164,6 +273,7 @@ def get_audio_file(filename):
     except FileNotFoundError:
         return jsonify({"error": f"File {filename} not found"}), 404
 
+
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if 'file' not in request.files:
@@ -171,60 +281,51 @@ def upload_file():
     file = request.files['file']
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
-    if file and file.filename.endswith('.mp3'):
+    if file and file.filename.lower().endswith(('.mp3', '.wav')):
         file_path = os.path.join(audio_directory, file.filename)
         file.save(file_path)
         return jsonify({"audio_url": f"http://localhost:5000/audio/file/{file.filename}"}), 200
-    return jsonify({"error": "Invalid file format, only MP3 allowed"}), 400
+    return jsonify({"error": "Invalid file format, only MP3 and WAV allowed"}), 400
+
 
 # Streamlit UI
 if __name__ == "__main__":
-    # Initialize Flask server only once using session state
     if 'flask_started' not in st.session_state:
         def run_flask():
             app.run(debug=False, port=5000, use_reloader=False)
 
+
         threading.Thread(target=run_flask, daemon=True).start()
         st.session_state.flask_started = True
-        time.sleep(1)  # Give Flask time to start
+        time.sleep(2)
 
     st.title("Voice Message Manager & API Tester")
 
-    # Initialize session state for managing refreshes
     if 'refresh_trigger' not in st.session_state:
         st.session_state.refresh_trigger = 0
 
-    # Initialize file list in session state to avoid unnecessary refreshes
     if 'last_file_count' not in st.session_state:
         st.session_state.last_file_count = 0
 
-    uploaded_file = st.file_uploader("Upload a new VM audio file", type=["mp3"])
+    uploaded_file = st.file_uploader("Upload a new VM audio file", type=["mp3", "wav"])
     if uploaded_file and uploaded_file.name not in st.session_state.get('processed_files', set()):
-        # Initialize processed files set if not exists
         if 'processed_files' not in st.session_state:
             st.session_state.processed_files = set()
 
         file_path = os.path.join(audio_directory, uploaded_file.name)
         try:
-            # Save file locally first
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.getvalue())
 
-            # Upload to server
-            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), 'audio/mpeg')}
+            mime_type = 'audio/mpeg' if uploaded_file.name.lower().endswith('.mp3') else 'audio/wav'
+            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), mime_type)}
             response = requests.post("http://localhost:5000/upload", files=files)
 
             if response.status_code == 200:
-                # Automatically set the uploaded file as default
                 with open(selected_default_file_path, "w") as f:
                     f.write(uploaded_file.name)
-
-                # Mark file as processed to prevent re-processing
                 st.session_state.processed_files.add(uploaded_file.name)
-
                 st.success(f"✅ Uploaded and set {uploaded_file.name} as the new default VM audio.")
-
-                # Use st.experimental_rerun() or just let the next run handle the refresh
                 time.sleep(0.3)
                 st.rerun()
             else:
@@ -234,64 +335,43 @@ if __name__ == "__main__":
 
     st.subheader("Available Voice Files")
 
-    # Get available audio files with error handling
     try:
-        audio_files = []
-        if os.path.exists(audio_directory):
-            audio_files = [f for f in os.listdir(audio_directory)
-                           if f.endswith(".mp3") and os.path.exists(os.path.join(audio_directory, f))]
-        else:
-            os.makedirs(audio_directory, None, True)
+        audio_files = [f for f in os.listdir(audio_directory) if
+                       f.lower().endswith((".mp3", ".wav")) and os.path.exists(os.path.join(audio_directory, f))]
     except Exception as e:
         st.error(f"Error reading audio directory: {e}")
         audio_files = []
 
-    # Handle file deletion
     if 'delete_requested' in st.session_state and st.session_state.delete_requested:
         file_to_delete = st.session_state.delete_file
         try:
             file_path = os.path.join(audio_directory, file_to_delete)
-
-            # Check if file exists before attempting deletion
             if os.path.exists(file_path):
-                # Check if this is the current default before deletion
                 current_default = get_default_audio_file()
                 is_default = (current_default == file_to_delete)
-
-                # Delete the file
                 os.remove(file_path)
-
-                # If deleted file was default, clear default_audio.txt
                 if is_default and os.path.exists(selected_default_file_path):
                     os.remove(selected_default_file_path)
                     st.warning(f"⚠️ Deleted default file {file_to_delete}. Please select a new default.")
                 else:
                     st.success(f"✅ Deleted {file_to_delete}")
-
-                # Remove from processed files if it exists
                 if 'processed_files' in st.session_state and file_to_delete in st.session_state.processed_files:
                     st.session_state.processed_files.remove(file_to_delete)
             else:
                 st.error(f"❌ File {file_to_delete} not found!")
-
         except FileNotFoundError:
             st.error(f"❌ File {file_to_delete} was already deleted or not found!")
         except Exception as e:
             st.error(f"❌ Error deleting {file_to_delete}: {e}")
         finally:
-            # Clear the delete request
             if 'delete_requested' in st.session_state:
                 del st.session_state.delete_requested
             if 'delete_file' in st.session_state:
                 del st.session_state.delete_file
-            # Force immediate rerun after deletion to refresh the file list
             st.rerun()
 
-    files_to_delete = []
     for audio_file in audio_files:
         col1, col2, col3 = st.columns([3, 1, 1])
-
-        # Get current default to show indicator
         current_default = get_default_audio_file()
         file_display_name = f"🎵 {audio_file}"
         if current_default == audio_file:
@@ -301,59 +381,49 @@ if __name__ == "__main__":
             st.write(file_display_name)
 
         with col2:
-            # Set as default button
             if st.button(f"📌 Default", key=f"default_{audio_file}", disabled=(current_default == audio_file)):
                 try:
                     with open(selected_default_file_path, "w") as f:
                         f.write(audio_file)
                     st.success(f"✅ Set {audio_file} as default!")
-                    # No need for immediate rerun, let natural refresh handle it
                 except Exception as e:
                     st.error(f"❌ Failed to set default: {e}")
 
         with col3:
-            # Delete button - only show if file actually exists
             if os.path.exists(os.path.join(audio_directory, audio_file)):
                 if st.button(f"🗑️ Delete", key=f"delete_{audio_file}"):
-                    # Set deletion request in session state instead of immediate deletion
                     st.session_state.delete_requested = True
                     st.session_state.delete_file = audio_file
                     st.rerun()
             else:
                 st.write("❌ Missing")
 
-    # Show current default audio player
     if audio_files:
         current_default = get_default_audio_file()
         if current_default and current_default in audio_files:
-            # Double-check the file exists before trying to play it
             audio_path = os.path.join(audio_directory, current_default)
             if os.path.exists(audio_path):
                 st.subheader("Current Default Audio")
                 try:
-                    st.audio(audio_path, format='audio/mp3')
+                    audio_format = 'audio/mp3' if current_default.lower().endswith('.mp3') else 'audio/wav'
+                    st.audio(audio_path, format=audio_format)
                     st.info(f"🎵 Currently playing: {current_default}")
                 except Exception as e:
                     st.warning(f"⚠️ Cannot play default audio: {str(e)}")
             else:
                 st.warning(f"⚠️ Default file {current_default} not found! Please select a new default.")
-                # Clear the invalid default
                 if os.path.exists(selected_default_file_path):
                     os.remove(selected_default_file_path)
         else:
             st.info("ℹ️ No default audio file set. Click '📌 Default' next to any file to set it as default.")
     else:
-        st.info("ℹ️ No audio files available. Please upload an MP3 file.")
+        st.info("ℹ️ No audio files available. Please upload an MP3 or WAV file.")
 
-    # Simplified default selection (alternative method)
     if audio_files:
         st.subheader("Alternative: Select Default via Dropdown")
         current_default = get_default_audio_file()
-
-        # Filter current_default to ensure it exists in the current file list
         if current_default and current_default not in audio_files:
             current_default = None
-            # Clear invalid default
             if os.path.exists(selected_default_file_path):
                 os.remove(selected_default_file_path)
 
@@ -371,7 +441,6 @@ if __name__ == "__main__":
 
         if st.button("Set Selected as Default", key="set_selected_default"):
             try:
-                # Verify the selected file still exists
                 if os.path.exists(os.path.join(audio_directory, selected_audio)):
                     with open(selected_default_file_path, "w") as f:
                         f.write(selected_audio)
@@ -386,34 +455,37 @@ if __name__ == "__main__":
         test_uuid = st.text_input("UUID", str(uuid.uuid4()))
         test_phone = st.text_input("Phone Number", "1234567890")
         test_text = st.text_area("Text", "Please leave your message after the tone")
+        test_audio = st.file_uploader("Upload Audio for Transcription", type=["mp3", "wav"], key="test_audio")
         submitted = st.form_submit_button("Send Test")
 
         if submitted:
             try:
-                response = requests.post("http://localhost:5000/api/respond", json={
+                files = {}
+                data = {
                     "uuid": test_uuid,
                     "phone_number": test_phone,
                     "text": test_text
-                })
+                }
+                if test_audio:
+                    mime_type = 'audio/mpeg' if test_audio.name.lower().endswith('.mp3') else 'audio/wav'
+                    files = {"audio": (test_audio.name, test_audio.getvalue(), mime_type)}
+                response = requests.post("http://localhost:5000/api/respond", data=data, files=files)
                 if response.status_code == 200:
                     result = response.json()
                     st.success("✅ API Response:")
                     st.json(result)
 
-                    # Show additional info about the response
                     if result.get("response") == "VM":
                         st.info("🎵 Voicemail keywords detected - VM audio will be played")
                     elif result.get("response") == "No VM":
                         st.info("🚫 Honeypot keywords detected - No VM audio included")
                     else:
                         st.info("➡️ No matching keywords detected - not available")
-
                 else:
                     st.error(f"❌ Failed to call API: {response.status_code} - {response.text}")
             except Exception as e:
                 st.error(f"❌ Failed to call API: {str(e)}")
 
-    # Show current status
     st.sidebar.subheader("Current Status")
     current_default = get_default_audio_file()
     if current_default:
