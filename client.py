@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from vosk import Model, KaldiRecognizer
@@ -8,6 +9,7 @@ from pydub import AudioSegment
 import io
 import time
 import logging
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,7 +31,7 @@ app = FastAPI()
 
 # Pydantic model for request body
 class AudioRequest(BaseModel):
-    file_path: str  # Local file path to audio file (required)
+    file_path: str  # File path or HTTP URL to audio file (required)
 
 
 def convert_to_wav(audio_data: bytes, filename: str) -> tuple[bytes | None, str | None]:
@@ -101,10 +103,10 @@ async def transcribe_audio(audio_data: bytes, filename: str) -> dict:
 @app.post("/transcribe")
 async def transcribe(request: AudioRequest):
     """
-    API endpoint to transcribe audio from a file path.
+    API endpoint to transcribe audio from a file path or HTTP URL.
 
     Args:
-        request: AudioRequest with file_path.
+        request: AudioRequest with file_path (local path or HTTP URL).
 
     Returns:
         JSON response with transcription or error.
@@ -114,25 +116,40 @@ async def transcribe(request: AudioRequest):
         if not file_path:
             raise HTTPException(status_code=400, detail="file_path is required")
 
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"Audio file not found at {file_path}")
+        # Check if file_path is a URL
+        is_url = file_path.startswith(('http://', 'https://'))
+
+        # Derive filename
+        if is_url:
+            filename = os.path.basename(urlparse(file_path).path)
+        else:
+            filename = os.path.basename(file_path)
 
         # Validate file extension
-        file_extension = os.path.splitext(file_path)[1].lower()
+        file_extension = os.path.splitext(filename)[1].lower()
         if file_extension not in ['.mp3', '.wav']:
             raise HTTPException(status_code=400,
                                 detail=f"Unsupported file format: {file_extension}. Only .mp3 and .wav are supported.")
 
-        # Derive filename from file_path
-        filename = os.path.basename(file_path)
-
         # Read audio data
-        with open(file_path, "rb") as f:
-            audio_data = f.read()
+        if is_url:
+            logger.debug(f"Downloading audio from URL: {file_path}")
+            response = requests.get(file_path, timeout=10)
+            if response.status_code != 200:
+                raise HTTPException(status_code=404, detail=f"Failed to download audio from {file_path}")
+            audio_data = response.content
+        else:
+            if not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail=f"Audio file not found at {file_path}")
+            with open(file_path, "rb") as f:
+                audio_data = f.read()
 
         result = await transcribe_audio(audio_data, filename)
         return result
 
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error downloading audio from URL: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error downloading audio: {str(e)}")
     except Exception as e:
         logger.error(f"Error in /transcribe: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
