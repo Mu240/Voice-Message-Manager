@@ -1,161 +1,191 @@
 import asyncio
-import os
+import websockets
 import json
-import requests
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from vosk import Model, KaldiRecognizer
+import logging
+import os
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydub import AudioSegment
 import io
 import time
-import logging
 from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Path to FFmpeg executable
+# Path to FFmpeg executable (update this path based on your system)
 FFMPEG_PATH = r"C:\Users\mha82\Downloads\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe"
 
 # Set FFmpeg path for pydub
 if os.path.exists(FFMPEG_PATH):
     AudioSegment.converter = FFMPEG_PATH
 else:
-    logger.error(f"FFmpeg executable not found at {FFMPEG_PATH}. Please update FFMPEG_PATH.")
+    logger.error(f"FFmpeg executable not found at {FFMPEG_PATH}")
     exit(1)
 
-# FastAPI app
-app = FastAPI()
+app = FastAPI(title="Vosk WebSocket Client API")
 
-
-# Pydantic model for request body
-class AudioRequest(BaseModel):
-    file_path: str  # File path or HTTP URL to audio file (required)
-
-
-def convert_to_wav(audio_data: bytes, filename: str) -> tuple[bytes | None, str | None]:
+async def download_audio(url: str) -> tuple[bytes, str, str]:
     """
-    Convert audio data to WAV format (16kHz, mono, 16-bit PCM) for Vosk.
+    Download audio file from the given URL.
 
     Args:
-        audio_data: Raw audio data (bytes).
-        filename: Name of the audio file to determine format.
+        url: URL to the audio file.
 
     Returns:
-        tuple: (converted WAV data as bytes, error message if any).
+        Tuple of (audio data as bytes, filename, error message if any).
     """
     try:
-        file_extension = os.path.splitext(filename)[1].lower()
-        if file_extension not in ['.mp3', '.wav']:
-            return None, f"Unsupported file format: {file_extension}. Only .mp3 and .wav are supported."
-
-        audio = AudioSegment.from_file(io.BytesIO(audio_data), format=file_extension[1:])
-        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-        output = io.BytesIO()
-        audio.export(output, format="wav")
-        return output.getvalue(), None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            audio_data = response.content
+            filename = os.path.basename(urlparse(url).path)
+            file_extension = os.path.splitext(filename)[1].lower()
+            if file_extension not in ['.mp3', '.wav']:
+                return None, filename, f"Unsupported file format: {file_extension}"
+            logger.debug(f"Downloaded audio from {url}, size: {len(audio_data)} bytes")
+            return audio_data, filename, None
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error downloading audio: {e}")
+        return None, "", f"HTTP error downloading audio: {str(e)}"
+    except httpx.RequestError as e:
+        logger.error(f"Request error downloading audio: {e}")
+        return None, "", f"Request error downloading audio: {str(e)}"
     except Exception as e:
-        logger.error(f"Error converting audio: {str(e)}")
-        return None, f"Error converting audio: {str(e)}"
+        logger.error(f"Unexpected error downloading audio: {e}")
+        return None, "", f"Unexpected error downloading audio: {str(e)}"
 
-
-async def transcribe_audio(audio_data: bytes, filename: str) -> dict:
+async def send_audio_to_websocket(audio_data: bytes, filename: str, config: dict = None) -> dict:
     """
-    Transcribe audio data using Vosk.
+    Send audio data to the WebSocket server in chunks and collect transcription results.
 
     Args:
-        audio_data: Raw audio data (bytes).
-        filename: Name for format detection.
+        audio_data: Raw audio data as bytes.
+        filename: Name of the audio file (used to determine format).
+        config: Optional configuration dictionary for the recognizer.
 
     Returns:
-        dict: Transcription result with status and text.
+        Dictionary containing concatenated transcription, errors, and status.
     """
-    model_path = "D:/next_agent/vosk-model-en-us-0.42-gigaspeech"
-    if not os.path.exists(model_path):
-        logger.error(f"Vosk model not found at {model_path}")
-        return {"error": f"Vosk model not found at {model_path}"}
+    uri = "ws://localhost:2700"
+    result = {"transcription": "", "errors": [], "status": "incomplete"}
+    transcription_parts = []  # Collect all transcription parts
+    try:
+        async with websockets.connect(uri, ping_interval=30, ping_timeout=300, close_timeout=30, max_size=52_428_800) as websocket:
+            logger.info(f"Connected to WebSocket server at {uri}")
 
-    logger.info("Loading Vosk model...")
-    start_time = time.time()
-    model = Model(model_path)
-    rec = KaldiRecognizer(model, 16000)
-    logger.info(f"Model loaded in {time.time() - start_time:.2f} seconds")
+            # Send configuration if provided
+            if config:
+                await websocket.send(json.dumps({"config": config}))
+                logger.debug(f"Sent config: {config}")
 
-    logger.debug(f"Processing audio data, size: {len(audio_data)} bytes")
-    wav_data, error = convert_to_wav(audio_data, filename)
-    if error:
-        return {"error": error}
+            # Send filename
+            await websocket.send(json.dumps({"filename": filename}))
+            logger.debug(f"Sent filename: {filename}")
 
-    logger.debug(f"Audio conversion took {time.time() - start_time:.2f} seconds")
+            # Send audio data in chunks
+            chunk_size = 1_000_000  # 1 MB chunks
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                await websocket.send(chunk)
+                await websocket.send(json.dumps({"chunk": i // chunk_size + 1}))
+                logger.debug(f"Sent audio chunk {i // chunk_size + 1}, size: {len(chunk)} bytes")
+                await asyncio.sleep(0.1)  # Small delay to prevent overwhelming the server
 
-    if rec.AcceptWaveform(wav_data):
-        result = json.loads(rec.Result())
-        result["status"] = "Final transcription"
-        logger.info(f"Transcription result: {result}")
-        return result
-    else:
-        partial = json.loads(rec.PartialResult())
-        logger.debug(f"Partial transcription: {partial}")
-        return partial
+            # Send EOF to signal end of audio
+            await websocket.send(json.dumps({"eof": 1}))
+            logger.debug("Sent EOF")
 
+            # Receive responses
+            while True:
+                try:
+                    message = await asyncio.wait_for(websocket.recv(), timeout=300.0)
+                    logger.debug(f"Received message: {message}")
+                    response = json.loads(message)
+
+                    if "error" in response:
+                        result["errors"].append(response["error"])
+                        logger.error(f"Server error: {response['error']}")
+                    elif "status" in response:
+                        logger.info(f"Server status: {response['status']}")
+                    elif "partial" in response:
+                        transcription_parts.append(response["partial"])
+                        logger.debug(f"Partial transcription: {response['partial']}")
+                    elif "text" in response:
+                        transcription_parts.append(response["text"])
+                        logger.info(f"Final transcription: {response['text']}")
+                        result["status"] = "complete"
+
+                    # Check for final transcription
+                    if response.get("status") == "Final transcription":
+                        break
+
+                except asyncio.TimeoutError:
+                    logger.warning("WebSocket receive timeout")
+                    result["errors"].append("WebSocket receive timeout")
+                    await websocket.send(json.dumps({"status": "Keepalive"}))
+                    continue
+                except websockets.exceptions.ConnectionClosedError as e:
+                    logger.warning(f"WebSocket connection closed: {e}")
+                    result["errors"].append(f"WebSocket connection closed: {str(e)}")
+                    break
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON received: {e}")
+                    result["errors"].append(f"Invalid JSON received: {str(e)}")
+                    break
+
+    except Exception as e:
+        logger.error(f"WebSocket connection error: {e}")
+        result["errors"].append(f"WebSocket connection error: {str(e)}")
+        result["status"] = "failed"
+
+    # Concatenate all transcription parts into a single string
+    result["transcription"] = " ".join(part for part in transcription_parts if part).strip()
+
+    return result
 
 @app.post("/transcribe")
-async def transcribe(request: AudioRequest):
+async def transcribe_audio(request: Request):
     """
-    API endpoint to transcribe audio from a file path or HTTP URL.
+    HTTP endpoint to transcribe audio from a URL via WebSocket server.
 
     Args:
-        request: AudioRequest with file_path (local path or HTTP URL).
+        request: JSON payload with `url` and optional `config`.
 
     Returns:
-        JSON response with transcription or error.
+        JSON response with concatenated transcription, errors, status, and processing time.
     """
     try:
-        file_path = request.file_path
-        if not file_path:
-            raise HTTPException(status_code=400, detail="file_path is required")
+        # Parse JSON payload
+        data = await request.json()
+        url = data.get("url")
+        config = data.get("config")
 
-        # Check if file_path is a URL
-        is_url = file_path.startswith(('http://', 'https://'))
+        # Validate inputs
+        if not url:
+            raise HTTPException(status_code=400, detail="Missing url field")
 
-        # Derive filename
-        if is_url:
-            filename = os.path.basename(urlparse(file_path).path)
-        else:
-            filename = os.path.basename(file_path)
+        # Download audio
+        start_time = time.time()
+        audio_data, filename, error = await download_audio(url)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
 
-        # Validate file extension
-        file_extension = os.path.splitext(filename)[1].lower()
-        if file_extension not in ['.mp3', '.wav']:
-            raise HTTPException(status_code=400,
-                                detail=f"Unsupported file format: {file_extension}. Only .mp3 and .wav are supported.")
+        # Send to WebSocket server
+        result = await send_audio_to_websocket(audio_data, filename, config)
+        result["processing_time"] = time.time() - start_time
 
-        # Read audio data
-        if is_url:
-            logger.debug(f"Downloading audio from URL: {file_path}")
-            response = requests.get(file_path, timeout=10)
-            if response.status_code != 200:
-                raise HTTPException(status_code=404, detail=f"Failed to download audio from {file_path}")
-            audio_data = response.content
-        else:
-            if not os.path.exists(file_path):
-                raise HTTPException(status_code=404, detail=f"Audio file not found at {file_path}")
-            with open(file_path, "rb") as f:
-                audio_data = f.read()
+        return JSONResponse(content=result)
 
-        result = await transcribe_audio(audio_data, filename)
-        return result
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error downloading audio from URL: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error downloading audio: {str(e)}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
     except Exception as e:
-        logger.error(f"Error in /transcribe: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+        logger.error(f"Error processing request: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
