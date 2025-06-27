@@ -12,17 +12,6 @@ import logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Path to FFmpeg executable
-FFMPEG_PATH = r"C:\Users\mha82\Downloads\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe"
-
-# Set FFmpeg path for pydub
-if os.path.exists(FFMPEG_PATH):
-    AudioSegment.converter = FFMPEG_PATH
-else:
-    logger.error(f"FFmpeg executable not found at {FFMPEG_PATH}. Please update FFMPEG_PATH.")
-    exit(1)
-
-
 def convert_to_wav(audio_data, filename):
     """
     Convert audio data to WAV format (16kHz, mono, 16-bit PCM) for Vosk.
@@ -48,7 +37,6 @@ def convert_to_wav(audio_data, filename):
         logger.error(f"Error converting audio: {str(e)}")
         return None, f"Error converting audio: {str(e)}"
 
-
 async def recognize(websocket, path=None):
     """
     Handle WebSocket connections, process JSON configs and audio data, and send transcription results.
@@ -58,7 +46,7 @@ async def recognize(websocket, path=None):
         path: WebSocket path (unused).
     """
     try:
-        model_path = "D:/next_agent/vosk-model-en-us-0.42-gigaspeech"
+        model_path = "/home/ubuntu/vosk_model"
         if not os.path.exists(model_path):
             error_msg = f"Vosk model not found at {model_path}"
             logger.error(error_msg)
@@ -140,7 +128,6 @@ async def recognize(websocket, path=None):
         except websockets.exceptions.ConnectionClosedError:
             logger.warning("Failed to send error message: connection already closed")
 
-
 async def main():
     """
     Start the WebSocket server with increased ping timeout for stability.
@@ -158,7 +145,6 @@ async def main():
         await server.wait_closed()
     except Exception as e:
         logger.error(f"Error starting server: {e}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
