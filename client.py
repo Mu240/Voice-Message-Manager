@@ -15,16 +15,6 @@ from urllib.parse import urlparse
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Path to FFmpeg executable (update this path based on your system)
-FFMPEG_PATH = r"C:\Users\mha82\Downloads\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe"
-
-# Set FFmpeg path for pydub
-if os.path.exists(FFMPEG_PATH):
-    AudioSegment.converter = FFMPEG_PATH
-else:
-    logger.error(f"FFmpeg executable not found at {FFMPEG_PATH}")
-    exit(1)
-
 app = FastAPI(title="Vosk WebSocket Client API")
 
 async def download_audio(url: str) -> tuple[bytes, str, str]:
