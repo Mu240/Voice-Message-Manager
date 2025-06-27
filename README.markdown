@@ -107,13 +107,7 @@ A Flask and Streamlit application with Vosk WebSocket and FastAPI client for man
       ```
     - Followed by raw audio bytes.
 - **How to Test**:
-  - **Run**: `python vosk_server.py`
-  - **Test with WebSocket Client**:
-    1. Use a WebSocket client (e.g., `wscat` or Python script).
-    2. Connect to `ws://localhost:2700`.
-    3. Send JSON config: `{"config": {"sample_rate": 16000}}`.
-    4. Send audio bytes from a 16kHz, mono, 16-bit PCM WAV file.
-    5. Receive transcription results (e.g., `{"result": [{"word": "hello", "start": 0.0, "end": 0.5, "conf": 0.99}]}).
+  - **Run**: `python vosk_server.py`  
   
 
 ### 3. `client.py`
