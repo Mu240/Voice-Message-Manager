@@ -3,27 +3,38 @@ import os
 import websockets
 import json
 from vosk import Model, KaldiRecognizer
+from pydub import AudioSegment
+import io
+import subprocess
 
-# Keyword lists (same as in app.py)
-voicemail_keywords = [
-    "beep", "tone", "message", "unable", "available", "system",
-    "after the beep", "please leave a message", "at the tone",
-    "after the tone", "please leave your message",
-    "please record a message", "please record your message",
-    "voice messaging system", "unable to answer the phone right now",
-    "person you are trying to reach is not available"
-]
-honeypot_keywords = [
-    "im listening", "i dont hear you", "please explain",
-    "why are you calling", "say your name", "i did not consent",
-    "otherwise", "date and time", "consent", "please say your name",
-    "please fully describe your product or service", "describe",
-    "product or service", "product", "service", "can you hear me",
-    "what did you say", "location", "company", "located", "email",
-    "are you there", "tell me more", "wait wait wait",
-    "can you hear me good good good", "go ahead and",
-    "go ahead and do it", "blessed day", "call me back later"
-]
+# Path to FFmpeg executable
+FFMPEG_PATH = r"C:\Users\mha82\Downloads\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe"
+
+# Set FFmpeg path for pydub
+if os.path.exists(FFMPEG_PATH):
+    AudioSegment.converter = FFMPEG_PATH
+else:
+    print(f"Error: FFmpeg executable not found at {FFMPEG_PATH}. Please update FFMPEG_PATH in vosk_server.py.")
+
+def convert_to_wav(audio_data, filename):
+    try:
+        # Determine input format based on filename extension
+        file_extension = os.path.splitext(filename)[1].lower()
+        if file_extension not in ['.mp3', '.wav']:
+            return None, f"Unsupported file format: {file_extension}"
+
+        # Load audio data using pydub
+        audio = AudioSegment.from_file(io.BytesIO(audio_data), format=file_extension[1:])
+        
+        # Convert to WAV format suitable for Vosk (16kHz, mono, 16-bit PCM)
+        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        
+        # Export to bytes
+        output = io.BytesIO()
+        audio.export(output, format="wav")
+        return output.getvalue(), None
+    except Exception as e:
+        return None, f"Error converting audio: {str(e)}"
 
 async def recognize(websocket, path=None):
     try:
@@ -32,14 +43,27 @@ async def recognize(websocket, path=None):
             await websocket.send(json.dumps({"error": f"Vosk model not found at {model_path}"}))
             return
         model = Model(model_path)
-        rec = KaldiRecognizer(model, 16000, json.dumps({
-            "words": voicemail_keywords + honeypot_keywords
-        }))
+        rec = KaldiRecognizer(model, 16000)
 
         while True:
             message = await websocket.recv()
             if isinstance(message, bytes):
-                if rec.AcceptWaveform(message):
+                # Assume first message includes filename as JSON
+                try:
+                    config = json.loads(message)
+                    if "filename" in config:
+                        filename = config["filename"]
+                        continue
+                except json.JSONDecodeError:
+                    pass
+
+                # Convert audio to WAV format
+                wav_data, error = convert_to_wav(message, filename if 'filename' in locals() else "input.wav")
+                if error:
+                    await websocket.send(json.dumps({"error": error}))
+                    continue
+
+                if rec.AcceptWaveform(wav_data):
                     result = json.loads(rec.Result())
                     await websocket.send(json.dumps(result))
                 else:
